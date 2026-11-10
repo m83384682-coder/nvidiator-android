@@ -76,6 +76,8 @@
     <string name="cmd_ring_previous">Moves to the previous available setting in the synth settings ring</string>
     <string name="cmd_ring_up">Increases the currently active setting in the synth settings ring</string>
     <string name="cmd_ring_down">Decreases the currently active setting in the synth settings ring</string>
+    <string name="cmd_read_clipboard">Reports the text on the clipboard</string>
+    <string name="cmd_sleep_mode">Toggles sleep mode on and off for the active app</string>
     <string name="cmd_spell">Spells the current navigator object</string>
 
     <!-- The NVDA menu: our gesture and key hints under NVDA\'s menu items -->
@@ -187,7 +189,9 @@
         <item>NVDA+1: input help</item>
         <item>NVDA+2: speak typed characters</item>
         <item>NVDA+3: speak typed words</item>
-        <item>NVDA+C: spell the current object</item>
+        <item>NVDA+C: read the clipboard</item>
+        <item>NVDA+Up arrow or NVDA+L twice: spell the current object</item>
+        <item>NVDA+Shift+S: sleep mode for the current app</item>
         <item>NVDA+F12: time (twice quickly: date)</item>
         <item>NVDA+F1: Speech viewer</item>
         <item>NVDA+Shift+B: battery status</item>
@@ -216,4 +220,56 @@
         <item>D: landmark</item>
         <item>T: table</item>
     </string-array>
+
+    <!-- v0.2 commands -->
+    <string name="cmd_clear_edit">In an edit box, clears its text. Elsewhere, reports the current navigator object</string>
+    <string name="cmd_paste">In an edit box, pastes the clipboard. Elsewhere, moves to the focus</string>
+    <string name="cmd_copy">Copies the selected text</string>
+    <string name="cmd_cut">Cuts the selected text</string>
+    <string name="cmd_select_all">Selects all text in the edit box</string>
+    <string name="cmd_scroll_forward">Scrolls the list forward</string>
+    <string name="cmd_scroll_backward">Scrolls the list back</string>
+    <string name="cmd_auto_scroll">Toggles automatic scrolling of lists</string>
+    <string name="cmd_tap_interrupt">Toggles speech interrupt on double tap and hold</string>
+    <string name="cmd_input_gestures">Shows the Input gestures dialog</string>
+    <string name="cmd_addon_store">Opens the Add-on Store</string>
+    <string name="cmd_say_cap">Toggles saying cap before capitals</string>
+    <string name="cmd_quick_settings">Opens quick settings</string>
+    <string name="cmd_none">No command</string>
+    <!-- v0.2 messages -->
+    <string name="screen_locked">Screen locked</string>
+    <string name="screen_unlocked">Unlocked</string>
+    <string name="screen_off">Screen off</string>
+    <string name="auto_scroll_on">Automatic scrolling on</string>
+    <string name="auto_scroll_off">Automatic scrolling off</string>
+    <string name="tap_interrupt_on">Speech interrupt on double tap on</string>
+    <string name="tap_interrupt_off">Speech interrupt on double tap off</string>
+    <string name="say_cap_on">Say cap before capitals on</string>
+    <string name="say_cap_off">Say cap before capitals off</string>
+    <string name="cleared">Cleared</string>
+    <string name="pasted">Pasted</string>
+    <string name="copied">Copied</string>
+    <string name="cut_done">Cut</string>
+    <string name="selected_all">All selected</string>
+    <string name="nothing_to_paste">Clipboard is empty</string>
+    <string name="cannot_scroll">Can\'t scroll</string>
+    <string name="addon_turned_off">The %1$s add-on was turned off. %2$s</string>
+    <string name="addon_not_supported">Windows-only parts such as app modules, synthesizers and braille drivers are not loaded on Android. Only the add-on\'s global plugins run.</string>
+    <string name="addon_none">No add-ons installed</string>
+    <string name="addons_reloaded">Add-ons reloaded</string>
+    <string name="gesture_unassigned">Unassigned</string>
+    <string name="gesture_pick_command">Choose a command for %1$s</string>
+    <string name="gesture_menu_required">The NVDA menu needs at least one gesture, so Exit stays reachable</string>
+    <string name="gesture_addon_section">Add-on gestures</string>
+    <string name="gesture_restart_hint">Gestures used by add-ons run before Nvidiator\'s own.</string>
+    <string name="welcome_android">On Android, swipe down then right, tap with three fingers, or double tap with two fingers to open the NVDA menu. Hold both volume keys to switch the accessibility shortcut back to TalkBack.</string>
+    <string name="settings_lock_announce">Announce when the screen locks and unlocks</string>
+    <string name="settings_auto_scroll">Automatic scrolling: swiping past the last visible item scrolls the list</string>
+    <string name="settings_tap_interrupt">Stop speech on double tap and double tap and hold</string>
+    <string name="settings_clipboard_sounds">Play sounds when copying and pasting</string>
+    <string name="settings_connection_sounds">Play sounds when a device connects or disconnects</string>
+    <string name="settings_categories_hint">Choose a category</string>
+    <string name="welcome_touch_hint">On a touch screen, swipe down then right, or tap with three fingers, to open the NVDA menu. Hold both volume keys to use your accessibility shortcut.</string>
+    <string name="hint_input_gestures">Change what each touch gesture does</string>
+    <string name="hint_addon_store">Install NVDA add-ons from a file</string>
 </resources>

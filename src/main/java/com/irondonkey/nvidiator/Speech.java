@@ -75,12 +75,17 @@ public final class Speech {
         if (!ready) return;
         // NVDA's 0-100 scale: 50 is the engine's normal speed and pitch, each 25 steps doubles or halves the rate.
         float rate = (float) Math.pow(2.0, (Prefs.rate(ctx) - 50) / 25.0);
+        // NVDA's rate boost: roughly triples the top speed, like OneCore and SAPI rate boost.
+        if (Prefs.rateBoost(ctx)) rate *= 3f;
         float pitch = (float) Math.pow(2.0, (Prefs.pitch(ctx) - 50) / 50.0);
         tts.setSpeechRate(rate);
         tts.setPitch(pitch);
         float v = Prefs.volume(ctx) / 100f;
-        Tones.volume = Math.max(0.2f, v);
-        Sounds.volume = Math.max(0.2f, v);
+        // NVDA 2024.2+: "Volume of NVDA sounds", optionally following the voice volume.
+        float sv = Prefs.soundVolume(ctx) / 100f;
+        if (Prefs.soundVolumeFollows(ctx)) sv *= Math.max(0.2f, v);
+        Tones.volume = sv;
+        Sounds.volume = sv;
     }
 
     /** Speaks text through NVDA's symbol processing, honouring the speech mode. */
@@ -107,6 +112,25 @@ public final class Speech {
             if (p != null && !p.trim().isEmpty()) text = p;
         }
         speakRaw(text, interrupt, utteranceId);
+    }
+
+    /** NVDA's capital letter handling for one character: pitch change, "cap", and a beep. */
+    public void speakCharacter(String c, String spoken, boolean interrupt) {
+        if (spoken == null) spoken = c;
+        boolean cap = c != null && c.length() == 1 && Character.isUpperCase(c.charAt(0));
+        if (!cap) { speak(spoken, interrupt, null, false); return; }
+        if (Prefs.beepCaps(ctx)) Tones.beep(2000, 50);   // NVDA's beepForCapitals: 2000 Hz, 50 ms
+        if (Prefs.sayCap(ctx)) {
+            String fmt = UiText.get(ctx, "capPrefix", "cap %s");
+            spoken = fmt.contains("%s") ? fmt.replace("%s", spoken) : "cap " + spoken;
+        }
+        int change = Prefs.capPitch(ctx);
+        if (!ready || change == 0 || !"talk".equals(Prefs.speechMode(ctx))) { speak(spoken, interrupt, null, false); return; }
+        float base = (float) Math.pow(2.0, (Prefs.pitch(ctx) - 50) / 50.0);
+        tts.setPitch(base * (1f + change / 100f));
+        speak(spoken, interrupt, null, false);
+        // TextToSpeech applies pitch per utterance when it is queued, so the normal pitch can come back now.
+        tts.setPitch(base);
     }
 
     private void speakRaw(String text, boolean interrupt, String utteranceId) {

@@ -38,6 +38,7 @@ public class NvdaMenuActivity extends Activity {
             case "preferences":
                 col = Ui.page(this, t("menuPreferences"));
                 Ui.item(this, col, t("menuSettings"), getString(R.string.hint_settings), v -> open(SettingsActivity.class));
+                Ui.item(this, col, t("menuInputGestures"), getString(R.string.hint_input_gestures), v -> open(InputGesturesActivity.class));
                 Ui.item(this, col, t("menuSaveConfig"), getString(R.string.hint_save_config), v -> {
                     Ui.speak(getString(R.string.config_saved));
                     finish();
@@ -55,6 +56,7 @@ public class NvdaMenuActivity extends Activity {
                 col = Ui.page(this, t("menuTools"));
                 Ui.item(this, col, t("menuSpeechViewer"), getString(R.string.hint_speech_viewer), v -> open(SpeechViewerActivity.class));
                 Ui.item(this, col, t("menuPythonConsole"), getString(R.string.hint_python_console), v -> open(PythonConsoleActivity.class));
+                Ui.item(this, col, t("menuAddonStore"), getString(R.string.hint_addon_store), v -> open(AddonStoreActivity.class));
                 break;
             case "help":
                 col = Ui.page(this, t("menuHelp"));

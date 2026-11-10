@@ -15,11 +15,16 @@ import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Notification;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.app.KeyguardManager;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -52,7 +57,7 @@ public class NvidiatorService extends AccessibilityService {
 
     public static NvidiatorService get() { return instance; }
 
-    private final Handler main = new Handler(Looper.getMainLooper());
+    final Handler main = new Handler(Looper.getMainLooper());
     private final ExecutorService pyThread = Executors.newSingleThreadExecutor();
     Speech speech;
 
@@ -78,6 +83,23 @@ public class NvidiatorService extends AccessibilityService {
     private AccessibilityNodeInfo lastHover;
     private boolean lastHoverIme = false;
     private boolean touchExploring = false;
+    // v0.2: speech interrupt on double tap / double tap and hold (the WhatsApp bug)
+    private final TapTracker tapTracker = new TapTracker();
+    private AccessibilityNodeInfo touchFirstNode;   // the first item explored during this touch
+    private AccessibilityNodeInfo holdGuardNode;    // don't re-read this item while the finger is held
+    private long holdGuardUntil = 0;
+    private final Runnable holdCheck = () -> {
+        if (tapTracker.checkHold(SystemClock.uptimeMillis()) == TapTracker.Result.HOLD) interruptForTap();
+    };
+    // v0.2: customizable gestures
+    private Map<String, String> gestureOverrides;
+    // v0.2: screen lock announcements and the PIN fix
+    private BroadcastReceiver screenReceiver;
+    private long lastPasswordEvent = 0;
+    private long pinStarSpokenAt = 0;
+    private String starText;   // NVDA's word for "*", cached so PIN typing never waits on Python
+    private AudioDeviceCallback audioDevices;
+    private boolean audioDevicesPrimed = false;
     private boolean gestureInProgress = false;
 
     // Say all.
@@ -119,6 +141,7 @@ public class NvidiatorService extends AccessibilityService {
         });
         Sounds.play("start");
         speech.start(this::onSpeechReady);
+        registerV02Receivers();
         // NVDA's Python modules start in the background; plain speech works until they are ready.
         pyThread.execute(() -> {
             boolean ok = NvdaPy.ensure(this);
@@ -127,6 +150,17 @@ public class NvidiatorService extends AccessibilityService {
                     try {
                         NvdaPy.module("nvidiator.androidApi").callAttr("setService", this);
                     } catch (Throwable t) { Log.w(TAG, "setService", t); }
+                    // v0.2: NVDA's welcome dialog, on first run (and later only if its checkbox is ticked).
+                    if (!Prefs.b(this, Prefs.WELCOME_DONE, false) || Prefs.showWelcome(this)) {
+                        main.postDelayed(() -> {
+                            try { openActivity(WelcomeActivity.class); } catch (Throwable t) { Log.w(TAG, "welcome", t); }
+                        }, 1500);
+                    }
+                    // v0.2: load add-ons. A failing add-on is turned off and reported, never fatal.
+                    pyThread.execute(() -> {
+                        JSONArray failed = Addons.start(this);
+                        main.post(() -> reportAddonFailures(failed));
+                    });
                 } else {
                     Sounds.play("error");
                 }
@@ -182,6 +216,9 @@ public class NvidiatorService extends AccessibilityService {
     }
 
     private void shutdown() {
+        unregisterV02Receivers();
+        main.removeCallbacks(holdCheck);
+        try { Addons.stop(); } catch (Throwable ignored) {}
         if (instance == this) {
             instance = null;
             try { NvdaPy.module("nvidiator.androidApi").callAttr("setService", (Object) null); } catch (Throwable ignored) {}
@@ -205,7 +242,78 @@ public class NvidiatorService extends AccessibilityService {
     public void speak(String text) { speak(text, true); }
 
     public void speak(String text, boolean interrupt) {
+        if (sleeping()) return;
+        // v0.2: when an add-on registered a speech filter or pre-speech handler, speech goes through
+        // NVDA's speech extension points in Python. Otherwise nothing changes and nothing waits.
+        if (Addons.speechHooks() && text != null && !text.trim().isEmpty()) {
+            if (interrupt && speech != null) speech.cancel();
+            pyThread.execute(() -> {
+                try { Addons.speakThrough(text, interrupt); }
+                catch (Throwable t) { Log.w(TAG, "speech hooks", t); main.post(() -> speakDirect(text, interrupt)); }
+            });
+            return;
+        }
+        speakDirect(text, interrupt);
+    }
+
+    /** Speaks without add-on speech hooks: for speech that already went through them. */
+    void speakDirect(String text, boolean interrupt) {
         if (speech != null) speech.speak(text, interrupt);
+    }
+
+    // ---- v0.2: events for add-ons (event_gainFocus and friends), sent only when an add-on handles them
+
+    private AccessibilityNodeInfo lastAddonFocus;
+    private String lastForegroundPkg = "";
+
+    private void addonEvent(String name, AccessibilityNodeInfo n) {
+        if (!Addons.wants(name)) return;
+        final String js;
+        try { js = n == null ? "" : Nodes.toJson(n).toString(); }
+        catch (Throwable t) { return; }
+        pyThread.execute(() -> {
+            JSONArray failed = Addons.event(name, js, null);
+            if (failed.length() > 0) main.post(() -> reportAddonFailures(failed));
+        });
+    }
+
+    private void addonFocusEvents(AccessibilityNodeInfo n) {
+        if (!Addons.started() || n == null) return;
+        if (lastAddonFocus != null && !lastAddonFocus.equals(n)) addonEvent("loseFocus", lastAddonFocus);
+        addonEvent("gainFocus", n);
+        addonEvent("becomeNavigatorObject", n);
+        lastAddonFocus = n;
+    }
+
+    private void addonEventsFor(AccessibilityEvent e) {
+        int type = e.getEventType();
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            CharSequence pkg = e.getPackageName();
+            if (pkg != null && !pkg.toString().equals(lastForegroundPkg)) {
+                lastForegroundPkg = pkg.toString();
+                if (Addons.wants("foreground")) {
+                    AccessibilityNodeInfo root = getRootInActiveWindow();
+                    addonEvent("foreground", root != null ? root : e.getSource());
+                }
+            }
+        } else if (type == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
+            if (Addons.wants("valueChange")) addonEvent("valueChange", e.getSource());
+        } else if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            if (Addons.wants("stateChange")) {
+                AccessibilityNodeInfo src = e.getSource();
+                if (src != null && src.isCheckable()) addonEvent("stateChange", src);
+            }
+        } else if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED && Build.VERSION.SDK_INT >= 30) {
+            int types = e.getContentChangeTypes();
+            boolean state = (types & AccessibilityEvent.CONTENT_CHANGE_TYPE_STATE_DESCRIPTION) != 0;
+            boolean name = (types & AccessibilityEvent.CONTENT_CHANGE_TYPE_CONTENT_DESCRIPTION) != 0;
+            if (!state && !name) return;
+            if (!Addons.wants("stateChange") && !Addons.wants("valueChange") && !Addons.wants("nameChange")) return;
+            AccessibilityNodeInfo src = e.getSource();
+            if (src == null || !src.equals(navigator)) return;
+            if (state) addonEvent(src.getRangeInfo() != null ? "valueChange" : "stateChange", src);
+            if (name) addonEvent("nameChange", src);
+        }
     }
 
     private void speakRaw(String text, boolean interrupt) {
@@ -226,6 +334,7 @@ public class NvidiatorService extends AccessibilityService {
     /** NVDA-style focus announcement: containers left, containers entered, then the object. */
     private void announce(AccessibilityNodeInfo n, boolean interrupt, String reason) {
         if (n == null) return;
+        if (holdGuardActive() && n.equals(holdGuardNode)) return;
         List<AccessibilityNodeInfo> now = Prefs.reportContainers(this) ? Nodes.containers(n) : new ArrayList<>();
         List<AccessibilityNodeInfo> entered = new ArrayList<>(), exited = new ArrayList<>();
         for (AccessibilityNodeInfo c : now) if (!lastContainers.contains(c)) entered.add(c);
@@ -241,6 +350,7 @@ public class NvidiatorService extends AccessibilityService {
         }
         if (text == null) text = Nodes.fallbackDescribe(n);
         speak(text, interrupt);
+        if ("focus".equals(reason)) addonFocusEvents(n);
     }
 
     private void setNavigator(AccessibilityNodeInfo n, boolean speakIt, boolean interrupt) {
@@ -276,17 +386,33 @@ public class NvidiatorService extends AccessibilityService {
     private void handleEvent(AccessibilityEvent e) {
         if (speech == null) return;
         int type = e.getEventType();
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && e.getPackageName() != null
+                && !"com.android.systemui".contentEquals(e.getPackageName())) {
+            activePkg = e.getPackageName().toString();
+        }
+        if (sleeping()) return;
+        if (Addons.started()) {
+            try { addonEventsFor(e); } catch (Throwable t) { Log.w(TAG, "add-on events", t); }
+        }
         switch (type) {
-            case AccessibilityEvent.TYPE_TOUCH_INTERACTION_START:
+            case AccessibilityEvent.TYPE_TOUCH_INTERACTION_START: {
                 touchExploring = false;
                 gestureInProgress = false;
                 if (sayAllActive) stopSayAll();
+                touchFirstNode = null;
+                long now = SystemClock.uptimeMillis();
+                if (tapTracker.onStart(now) == TapTracker.Result.DOUBLE_TAP) interruptForTap();
+                main.removeCallbacks(holdCheck);
+                main.postDelayed(holdCheck, TapTracker.HOLD_MS);
                 break;
+            }
             case AccessibilityEvent.TYPE_TOUCH_EXPLORATION_GESTURE_START:
                 touchExploring = true;
+                if (tapTracker.touching()) tapTracker.onMoved();   // exploring by touch is not a tap
                 break;
             case AccessibilityEvent.TYPE_GESTURE_DETECTION_START:
                 gestureInProgress = true;
+                tapTracker.onMoved();   // a swipe never interrupts speech by itself
                 break;
             case AccessibilityEvent.TYPE_TOUCH_INTERACTION_END:
                 // Lift to type on the on-screen keyboard, like TalkBack.
@@ -294,6 +420,9 @@ public class NvidiatorService extends AccessibilityService {
                     lastHover.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                 }
                 touchExploring = false;
+                tapTracker.onEnd(SystemClock.uptimeMillis());
+                main.removeCallbacks(holdCheck);
+                touchFirstNode = null;
                 break;
             case AccessibilityEvent.TYPE_VIEW_HOVER_ENTER:
                 onHover(e);
@@ -333,6 +462,7 @@ public class NvidiatorService extends AccessibilityService {
                 onContentChanged(e);
                 break;
             case AccessibilityEvent.TYPE_ANNOUNCEMENT:
+                if (holdGuardActive() && holdGuardNode != null && joinText(e).equals(Nodes.name(holdGuardNode))) break;
                 speak(joinText(e), false);
                 break;
             case AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED: {
@@ -363,6 +493,11 @@ public class NvidiatorService extends AccessibilityService {
         AccessibilityNodeInfo src = e.getSource();
         AccessibilityNodeInfo stop = Nodes.stopFor(src);
         if (stop == null) return;
+        if (tapTracker.touching()) {
+            if (touchFirstNode == null) touchFirstNode = stop;
+            else if (!touchFirstNode.equals(stop)) tapTracker.onMoved();
+        }
+        if (holdGuardActive() && stop.equals(holdGuardNode)) return;
         lastHover = stop;
         lastHoverIme = false;
         AccessibilityWindowInfo w = stop.getWindow();
@@ -399,6 +534,9 @@ public class NvidiatorService extends AccessibilityService {
                 && navigator.isVisibleToUser()) {
             return;
         }
+        // v0.2 PIN fix: the lock screen refreshes slowly and in several windows. While it is up, keep
+        // the navigator on the key it is on, so typing a PIN is not interrupted by a re-read of the screen.
+        if (isLocked() && navigator != null && navigator.refresh() && navigator.isVisibleToUser()) return;
         lastContainers = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
         String title = windowTitle();
@@ -455,9 +593,15 @@ public class NvidiatorService extends AccessibilityService {
         int from = e.getFromIndex(), added = e.getAddedCount(), removed = e.getRemovedCount();
         if (from < 0) return;
         if (e.isPassword()) {
-            if (added > 0 && Prefs.typedChars(this)) speakChar("*");
+            lastPasswordEvent = SystemClock.uptimeMillis();
+            // The lock screen's PIN view sends a second event (1 removed, 1 added) when a digit it showed
+            // turns into a dot; that is not a new character, so only plain additions speak.
+            // If the fallback star already spoke for this key press, don't speak a second one.
+            if (pinStarSpokenAt > 0 && lastPasswordEvent - pinStarSpokenAt < 1500) { pinStarSpokenAt = 0; return; }
+            if (added > 0 && removed == 0 && Prefs.typedChars(this)) speakStar();
             return;
         }
+        if (Prefs.interruptTyped(this) && added > 0 && speech != null && !sayAllActive) speech.cancel();
         if (added == 1 && removed == 0 && from < text.length()) {
             char c = text.charAt(from);
             boolean wordEnd = !Character.isLetterOrDigit(c);
@@ -484,12 +628,19 @@ public class NvidiatorService extends AccessibilityService {
 
     private void speakChar(String c) {
         String s = NvdaPy.ready() ? NvdaPy.speakCharacter(c) : c;
-        speakRaw(s == null ? c : s, true);
+        if (speech != null) speech.speakCharacter(c, s, true); else speakRaw(s == null ? c : s, true);
+    }
+
+    /** NVDA's typed-character echo for a password character, without a Python call per key. */
+    private void speakStar() {
+        if (starText == null && NvdaPy.ready()) starText = NvdaPy.speakCharacter("*");
+        String st = starText == null ? "*" : starText;
+        if (speech != null) speech.speakCharacter("*", st, true); else speakRaw(st, true);
     }
 
     private void speakCharQueued(String c) {
         String s = NvdaPy.ready() ? NvdaPy.speakCharacter(c) : c;
-        speakRaw(s == null ? c : s, false);
+        if (speech != null) speech.speakCharacter(c, s, false); else speakRaw(s == null ? c : s, false);
     }
 
     private void onSelectionChanged(AccessibilityEvent e) {
@@ -626,7 +777,9 @@ public class NvidiatorService extends AccessibilityService {
     }
 
     /** NVDA's navigatorObject_nextInFlow / previousInFlow (flick right and left in object mode). */
-    void moveInFlow(int dir) {
+    void moveInFlow(int dir) { moveInFlow(dir, true); }
+
+    void moveInFlow(int dir, boolean allowAutoScroll) {
         AccessibilityNodeInfo root = navRoot();
         if (root == null) { speak(m("noFocus", "No focus")); Sounds.play("error"); return; }
         List<AccessibilityNodeInfo> stops = Nodes.stops(root);
@@ -635,6 +788,7 @@ public class NvidiatorService extends AccessibilityService {
         int next;
         if (idx < 0) next = dir > 0 ? 0 : stops.size() - 1;
         else next = idx + dir;
+        if (allowAutoScroll && autoScroll(stops, idx, next, dir)) return;
         if (next < 0 || next >= stops.size()) {
             // At the edge, try to scroll the list the navigator is in, then try again.
             if (idx >= 0 && scrollContaining(stops.get(idx), dir)) {
@@ -834,7 +988,14 @@ public class NvidiatorService extends AccessibilityService {
         commands.put("stop", new Cmd(getString(R.string.cmd_stop), () -> { stopSayAll(); if (speech != null) speech.cancel(); }));
         commands.put("sayAll", new Cmd(getString(R.string.cmd_say_all), this::sayAll));
         commands.put("focus", new Cmd(getString(R.string.cmd_report_focus), this::reportFocus));
-        commands.put("current", new Cmd(getString(R.string.cmd_current), () -> { if (navigator != null) { navigator.refresh(); speak(describe(navigator, "query")); } }));
+        commands.put("current", new Cmd(getString(R.string.cmd_current), () -> {
+            // As in NVDA, pressing it twice quickly spells the current item.
+            long now = SystemClock.uptimeMillis();
+            boolean twice = now - lastCurrentPress < 600;
+            lastCurrentPress = twice ? 0 : now;
+            if (twice) { spellCurrent(); return; }
+            if (navigator != null) { navigator.refresh(); speak(describe(navigator, "query")); }
+        }));
         commands.put("title", new Cmd(getString(R.string.cmd_title), () -> speak(windowTitle())));
         commands.put("readWindow", new Cmd(getString(R.string.cmd_read_window), this::readWindow));
         commands.put("activate", new Cmd(getString(R.string.cmd_activate), this::activate));
@@ -859,6 +1020,22 @@ public class NvidiatorService extends AccessibilityService {
         commands.put("ringUp", new Cmd(getString(R.string.cmd_ring_up), () -> adjustRing(1)));
         commands.put("ringDown", new Cmd(getString(R.string.cmd_ring_down), () -> adjustRing(-1)));
         commands.put("spell", new Cmd(getString(R.string.cmd_spell), this::spellCurrent));
+        commands.put("clipboard", new Cmd(getString(R.string.cmd_read_clipboard), this::readClipboard));
+        commands.put("sleepMode", new Cmd(getString(R.string.cmd_sleep_mode), this::toggleSleepMode));
+        // v0.2 commands
+        commands.put("clearEdit", new Cmd(getString(R.string.cmd_clear_edit), this::clearEdit));
+        commands.put("paste", new Cmd(getString(R.string.cmd_paste), this::pasteCmd));
+        commands.put("copy", new Cmd(getString(R.string.cmd_copy), () -> clipAction(AccessibilityNodeInfo.ACTION_COPY, R.string.copied, "copy")));
+        commands.put("cut", new Cmd(getString(R.string.cmd_cut), () -> clipAction(AccessibilityNodeInfo.ACTION_CUT, R.string.cut_done, "copy")));
+        commands.put("selectAll", new Cmd(getString(R.string.cmd_select_all), this::selectAll));
+        commands.put("scrollForward", new Cmd(getString(R.string.cmd_scroll_forward), () -> scrollCmd(1)));
+        commands.put("scrollBackward", new Cmd(getString(R.string.cmd_scroll_backward), () -> scrollCmd(-1)));
+        commands.put("autoScroll", new Cmd(getString(R.string.cmd_auto_scroll), () -> toggle(Prefs.AUTO_SCROLL, true, R.string.auto_scroll_on, R.string.auto_scroll_off)));
+        commands.put("tapInterrupt", new Cmd(getString(R.string.cmd_tap_interrupt), () -> toggle(Prefs.TAP_INTERRUPT, true, R.string.tap_interrupt_on, R.string.tap_interrupt_off)));
+        commands.put("sayCap", new Cmd(getString(R.string.cmd_say_cap), () -> toggle(Prefs.SAY_CAP, false, R.string.say_cap_on, R.string.say_cap_off)));
+        commands.put("inputGestures", new Cmd(getString(R.string.cmd_input_gestures), () -> openActivity(InputGesturesActivity.class)));
+        commands.put("addonStore", new Cmd(getString(R.string.cmd_addon_store), () -> openActivity(AddonStoreActivity.class)));
+        commands.put("quickSettings", new Cmd(getString(R.string.cmd_quick_settings), () -> performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS)));
     }
 
     private void run(String id) {
@@ -878,6 +1055,16 @@ public class NvidiatorService extends AccessibilityService {
     }
 
     public void runCommand(String id) { main.post(() -> run(id)); }
+
+    /** NVDA's description of a command, for Input gestures; null when unknown. */
+    public String commandDescription(String id) {
+        ensureCommands();
+        Cmd c = commands.get(id);
+        return c == null ? null : c.description;
+    }
+
+    /** Input gestures saved a change: read the gesture map again on the next gesture. */
+    public void reloadGestures() { main.post(() -> gestureOverrides = null); }
 
     private void reportFocus() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
@@ -902,6 +1089,20 @@ public class NvidiatorService extends AccessibilityService {
     private void activate() {
         AccessibilityNodeInfo n = navigator;
         if (n == null) return;
+        if (isLocked() && isPinKey(n)) {
+            // v0.2 PIN fix: the lock screen's PIN view only reports typed digits while it has focus,
+            // and on the lock screen it usually does not, so a typed digit was silent. When no password
+            // event follows the press, speak NVDA's star for it.
+            // The press itself is never delayed or repeated: the click below runs at once, and this
+            // only schedules a light check that speaks at most one star per press.
+            final long pressed = SystemClock.uptimeMillis();
+            main.postDelayed(() -> {
+                if (lastPasswordEvent < pressed && Prefs.typedChars(this)) {
+                    pinStarSpokenAt = SystemClock.uptimeMillis();
+                    speakStar();
+                }
+            }, 300);
+        }
         if (!n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             AccessibilityNodeInfo p = n.getParent();
             for (int i = 0; i < 5 && p != null; i++) {
@@ -992,6 +1193,46 @@ public class NvidiatorService extends AccessibilityService {
         lastQuitPress = now;
     }
 
+    private long lastCurrentPress = 0;
+
+    // ---- v0.2: read clipboard and sleep mode ----------------------------------------------------
+
+    /** Android only lets the app in front read the clipboard, so a see-through screen reads it. */
+    private void readClipboard() {
+        Intent i = new Intent(this, ClipboardActivity.class);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+        try { startActivity(i); } catch (Throwable t) { speakRaw(m("clipboardEmpty", "There is no text on the clipboard"), true); }
+    }
+
+    /** Called by ClipboardActivity with the clipboard text, or null when there is none. */
+    void reportClipboard(CharSequence text) {
+        String s = text == null ? "" : text.toString();
+        if (s.trim().isEmpty()) { speakRaw(m("clipboardEmpty", "There is no text on the clipboard"), true); return; }
+        if (s.length() > 1024) {
+            speakRaw(m("clipboardLargeFmt", "The clipboard contains a large amount of text. It is %s character long").replace("%s", String.valueOf(s.length())), true);
+            return;
+        }
+        speakRaw(s, true);
+    }
+
+    private final java.util.Set<String> sleepingApps = new java.util.HashSet<>();
+    private String activePkg = "";
+
+    /** NVDA's sleep mode, per app: Nvidiator stays quiet in that app. Gestures still work so you
+     *  can turn it off again (Android can't hand them to the app while the screen reader is on). */
+    private void toggleSleepMode() {
+        String pkg = activePkg;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null && root.getPackageName() != null) pkg = root.getPackageName().toString();
+        if (pkg == null || pkg.isEmpty() || pkg.equals(getPackageName())) return;
+        boolean on = !sleepingApps.contains(pkg);
+        if (on) sleepingApps.add(pkg); else sleepingApps.remove(pkg);
+        activePkg = pkg;
+        speakDirect(m(on ? "sleepOn" : "sleepOff", on ? "Sleep mode on" : "Sleep mode off"), true);
+    }
+
+    private boolean sleeping() { return !sleepingApps.isEmpty() && sleepingApps.contains(activePkg); }
+
     private void spellCurrent() {
         String t = navigator == null ? "" : textFor(navigator);
         if (t.isEmpty()) return;
@@ -1025,6 +1266,277 @@ public class NvidiatorService extends AccessibilityService {
         speakRaw(String.valueOf(v), true);
     }
 
+
+    // ------------------------------------------------------------------ v0.2 helpers
+
+    /** Double tap, or double tap and hold: stop speech now, and don't re-read the item under the finger. */
+    private void interruptForTap() {
+        if (!Prefs.tapInterrupt(this)) return;
+        stopSayAll();
+        if (speech != null) speech.cancel();
+        holdGuardNode = navigator;
+        holdGuardUntil = SystemClock.uptimeMillis() + 2500;
+    }
+
+    private boolean holdGuardActive() {
+        if (holdGuardUntil == 0) return false;
+        if (SystemClock.uptimeMillis() > holdGuardUntil) { holdGuardUntil = 0; holdGuardNode = null; return false; }
+        return true;
+    }
+
+    private boolean isLocked() {
+        KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        return km != null && km.isKeyguardLocked();
+    }
+
+    /** A digit key on the lock screen's PIN pad: its label starts with a digit (\"2 ABC\"), or its id is keyN. */
+    private static boolean isPinKey(AccessibilityNodeInfo n) {
+        String id = n.getViewIdResourceName();
+        if (id != null && id.matches(".*:id/key[0-9]$")) return true;
+        String label = Nodes.name(n);
+        return label != null && !label.isEmpty() && Character.isDigit(label.charAt(0)) && label.length() <= 12;
+    }
+
+    private void registerV02Receivers() {
+        screenReceiver = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) { onScreenEvent(i.getAction()); }
+        };
+        IntentFilter f = new IntentFilter();
+        f.addAction(Intent.ACTION_SCREEN_OFF);
+        f.addAction(Intent.ACTION_SCREEN_ON);
+        f.addAction(Intent.ACTION_USER_PRESENT);
+        f.addAction(Intent.ACTION_POWER_CONNECTED);
+        f.addAction(Intent.ACTION_POWER_DISCONNECTED);
+        try { registerReceiver(screenReceiver, f); } catch (Throwable t) { Log.w(TAG, "screen receiver", t); screenReceiver = null; }
+        // Connected and disconnected sounds for audio devices (headphones, Bluetooth, USB). No permission needed.
+        AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        if (am != null) {
+            audioDevices = new AudioDeviceCallback() {
+                @Override public void onAudioDevicesAdded(AudioDeviceInfo[] d) {
+                    // The callback first reports every device already there; skip that.
+                    if (!audioDevicesPrimed) { audioDevicesPrimed = true; return; }
+                    if (hasUserDevice(d) && Prefs.connectionSounds(NvidiatorService.this)) Sounds.play("connected");
+                }
+                @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] d) {
+                    if (hasUserDevice(d) && Prefs.connectionSounds(NvidiatorService.this)) Sounds.play("disconnected");
+                }
+            };
+            am.registerAudioDeviceCallback(audioDevices, main);
+        }
+    }
+
+    private static boolean hasUserDevice(AudioDeviceInfo[] d) {
+        for (AudioDeviceInfo i : d) {
+            int t = i.getType();
+            if (t != AudioDeviceInfo.TYPE_BUILTIN_SPEAKER && t != AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+                    && t != AudioDeviceInfo.TYPE_BUILTIN_MIC && t != AudioDeviceInfo.TYPE_TELEPHONY
+                    && t != AudioDeviceInfo.TYPE_UNKNOWN && i.isSink()) return true;
+        }
+        return false;
+    }
+
+    private void unregisterV02Receivers() {
+        if (screenReceiver != null) {
+            try { unregisterReceiver(screenReceiver); } catch (Throwable ignored) {}
+            screenReceiver = null;
+        }
+        if (audioDevices != null) {
+            AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+            if (am != null) am.unregisterAudioDeviceCallback(audioDevices);
+            audioDevices = null;
+        }
+    }
+
+    /** v0.2 screen locked bug: announce lock and unlock, and drop the stale navigator. */
+    private void onScreenEvent(String action) {
+        if (action == null) return;
+        switch (action) {
+            case Intent.ACTION_SCREEN_OFF:
+                stopSayAll();
+                if (speech != null) speech.cancel();
+                navigator = null;
+                lastContainers = new ArrayList<>();
+                if (Prefs.lockAnnounce(this)) speak(getString(R.string.screen_off), true);
+                break;
+            case Intent.ACTION_SCREEN_ON:
+                navigator = null;
+                if (Prefs.lockAnnounce(this) && isLocked()) speak(getString(R.string.screen_locked), true);
+                main.removeCallbacks(windowChanged);
+                main.postDelayed(windowChanged, 600);
+                break;
+            case Intent.ACTION_USER_PRESENT:
+                navigator = null;
+                if (Prefs.lockAnnounce(this)) speak(getString(R.string.screen_unlocked), true);
+                main.removeCallbacks(windowChanged);
+                main.postDelayed(windowChanged, 600);
+                break;
+            case Intent.ACTION_POWER_CONNECTED:
+                if (Prefs.connectionSounds(this)) Sounds.play("connected");
+                break;
+            case Intent.ACTION_POWER_DISCONNECTED:
+                if (Prefs.connectionSounds(this)) Sounds.play("disconnected");
+                break;
+            default: break;
+        }
+    }
+
+    private void reportAddonFailures(JSONArray failed) {
+        if (failed == null) return;
+        for (int i = 0; i < failed.length(); i++) {
+            org.json.JSONObject o = failed.optJSONObject(i);
+            if (o != null) reportAddonFailure(o.optString("summary"), o.optString("reason"));
+        }
+    }
+
+    private void reportAddonFailure(String summary, String reason) {
+        Sounds.play("error");
+        speak(getString(R.string.addon_turned_off, summary, reason == null ? "" : reason), false);
+    }
+
+    /** Reloads add-ons after changes in the Add-on Store (NVDA restarts itself for this). */
+    static void restartAddons() {
+        NvidiatorService s = instance;
+        if (s == null) return;
+        s.pyThread.execute(() -> {
+            JSONArray failed = Addons.restart();
+            s.main.post(() -> { s.speak(s.getString(R.string.addons_reloaded), false); s.reportAddonFailures(failed); });
+        });
+    }
+
+    private AccessibilityNodeInfo focusedEditable() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return null;
+        AccessibilityNodeInfo f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        return f != null && f.isEditable() ? f : null;
+    }
+
+    /** Swipe left then right: clears the edit box; elsewhere reports the current item as before. */
+    private void clearEdit() {
+        AccessibilityNodeInfo e = focusedEditable();
+        if (e == null) { run("current"); return; }
+        Bundle b = new Bundle();
+        b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
+        if (e.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, b)) speak(getString(R.string.cleared), true);
+        else Sounds.play("error");
+    }
+
+    /** Swipe right then left: pastes in an edit box; elsewhere moves to the focus as before. */
+    private void pasteCmd() {
+        AccessibilityNodeInfo e = focusedEditable();
+        if (e == null) { run("focus"); return; }
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm == null || !cm.hasPrimaryClip()) { speak(getString(R.string.nothing_to_paste), true); return; }
+        if (e.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+            if (Prefs.clipboardSounds(this)) Sounds.play("paste");
+            else speak(getString(R.string.pasted), true);
+        } else Sounds.play("error");
+    }
+
+    private void clipAction(int action, int msg, String sound) {
+        AccessibilityNodeInfo e = focusedEditable();
+        if (e == null) e = navigator;
+        if (e != null && e.performAction(action)) {
+            if (sound != null && Prefs.clipboardSounds(this)) Sounds.play(sound);
+            else speak(getString(msg), true);
+        } else Sounds.play("error");
+    }
+
+    private void selectAll() {
+        AccessibilityNodeInfo e = focusedEditable();
+        if (e == null) { Sounds.play("error"); return; }
+        CharSequence t = e.getText();
+        Bundle b = new Bundle();
+        b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0);
+        b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, t == null ? 0 : t.length());
+        if (e.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, b)) speak(getString(R.string.selected_all), true);
+        else Sounds.play("error");
+    }
+
+    private void scrollCmd(int dir) {
+        AccessibilityNodeInfo n = navigator;
+        if (n == null) {
+            AccessibilityNodeInfo r = navRoot();
+            List<AccessibilityNodeInfo> st = r == null ? new ArrayList<>() : Nodes.stops(r);
+            n = st.isEmpty() ? null : st.get(0);
+        }
+        if (n == null || !scrollContaining(n, dir)) speak(getString(R.string.cannot_scroll), true);
+    }
+
+    private void toggle(String key, boolean def, int on, int off) {
+        boolean v = !Prefs.b(this, key, def);
+        Prefs.get(this).edit().putBoolean(key, v).apply();
+        speak(getString(v ? on : off), true);
+    }
+
+    void openActivity(Class<?> cls) {
+        Intent i = new Intent(this, cls);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        try { startActivity(i); } catch (Throwable t) { Log.w(TAG, "open " + cls.getSimpleName(), t); Sounds.play("error"); }
+    }
+
+    private static AccessibilityNodeInfo scrollableAncestor(AccessibilityNodeInfo n) {
+        AccessibilityNodeInfo p = n == null ? null : n.getParent();
+        for (int i = 0; i < 20 && p != null; i++) {
+            if (p.isScrollable()) return p;
+            p = p.getParent();
+        }
+        return null;
+    }
+
+    private static boolean isInside(AccessibilityNodeInfo n, AccessibilityNodeInfo ancestor) {
+        AccessibilityNodeInfo p = n;
+        for (int i = 0; i < 30 && p != null; i++) {
+            if (p.equals(ancestor)) return true;
+            p = p.getParent();
+        }
+        return false;
+    }
+
+    private static String signature(AccessibilityNodeInfo n) {
+        return Nodes.simpleClass(n) + "|" + Nodes.name(n);
+    }
+
+    /** v0.2 automatic scrolling: the list's own items, in reading order. */
+    private List<AccessibilityNodeInfo> itemsIn(AccessibilityNodeInfo list) {
+        List<AccessibilityNodeInfo> out = new ArrayList<>();
+        AccessibilityNodeInfo r = navRoot();
+        if (r == null || list == null) return out;
+        for (AccessibilityNodeInfo s : Nodes.stops(r)) if (isInside(s, list)) out.add(s);
+        return out;
+    }
+
+    /**
+     * v0.2 automatic scrolling. Returns true when it scrolled and will move the navigator itself:
+     * swiping past the last visible item of a list scrolls the list and moves to the first new item.
+     */
+    private boolean autoScroll(List<AccessibilityNodeInfo> stops, int idx, int next, int dir) {
+        if (idx < 0) return false;
+        AccessibilityNodeInfo cur = stops.get(idx);
+        AccessibilityNodeInfo list = scrollableAncestor(cur);
+        if (list == null) return false;
+        boolean can = Nodes.hasAction(list, dir > 0 ? AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_FORWARD
+                : AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_BACKWARD);
+        boolean nextInside = next >= 0 && next < stops.size() && isInside(stops.get(next), list);
+        if (!FlowLogic.shouldAutoScroll(Prefs.autoScroll(this), true, can, nextInside)) return false;
+        List<AccessibilityNodeInfo> beforeNodes = itemsIn(list);
+        List<String> before = new ArrayList<>();
+        for (AccessibilityNodeInfo b : beforeNodes) before.add(signature(b));
+        int navIndex = beforeNodes.indexOf(cur);
+        if (!list.performAction(dir > 0 ? AccessibilityNodeInfo.ACTION_SCROLL_FORWARD : AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)) return false;
+        main.postDelayed(() -> {
+            list.refresh();
+            List<AccessibilityNodeInfo> afterNodes = itemsIn(list);
+            List<String> after = new ArrayList<>();
+            for (AccessibilityNodeInfo a : afterNodes) after.add(signature(a));
+            int pick = FlowLogic.pickAfterScroll(before, after, navIndex, dir);
+            if (pick >= 0 && pick < afterNodes.size()) setNavigator(afterNodes.get(pick), true, true);
+            else moveInFlow(dir, false);
+        }, 350);
+        return true;
+    }
+
+    public void pyPlayFile(String path) { main.post(() -> Sounds.playFile(path)); }
+
     // ------------------------------------------------------------------ gestures
 
     @Override
@@ -1039,48 +1551,73 @@ public class NvidiatorService extends AccessibilityService {
     }
 
     private boolean handleGesture(int id) {
-        if (sayAllActive && id != GESTURE_SWIPE_DOWN_AND_RIGHT) stopSayAll();
-        String cmd = null;
-        switch (id) {
-            case GESTURE_SWIPE_RIGHT: cmd = "next"; break;
-            case GESTURE_SWIPE_LEFT: cmd = "previous"; break;
-            case GESTURE_SWIPE_UP: cmd = "up"; break;
-            case GESTURE_SWIPE_DOWN: cmd = "down"; break;
-            // The TalkBack menu gestures open the NVDA menu.
-            case GESTURE_SWIPE_DOWN_AND_RIGHT: cmd = "menu"; break;
-            case GESTURE_SWIPE_DOWN_AND_LEFT: cmd = "back"; break;
-            case GESTURE_SWIPE_UP_AND_LEFT: cmd = "home"; break;
-            case GESTURE_SWIPE_LEFT_AND_UP: cmd = "recents"; break;
-            case GESTURE_SWIPE_RIGHT_AND_DOWN: cmd = "notifications"; break;
-            case GESTURE_SWIPE_UP_AND_DOWN: cmd = "touchMode"; break;
-            case GESTURE_SWIPE_DOWN_AND_UP: cmd = "sayAll"; break;
-            case GESTURE_SWIPE_LEFT_AND_RIGHT: cmd = "current"; break;
-            case GESTURE_SWIPE_RIGHT_AND_LEFT: cmd = "focus"; break;
-            case GESTURE_SWIPE_UP_AND_RIGHT: cmd = "speechViewer"; break;
-            case GESTURE_SWIPE_LEFT_AND_DOWN: cmd = "title"; break;
-            case GESTURE_SWIPE_RIGHT_AND_UP: cmd = "time"; break;
-            default: break;
-        }
-        if (cmd == null && Build.VERSION.SDK_INT >= 30) {
-            switch (id) {
-                case GESTURE_3_FINGER_SINGLE_TAP: cmd = "menu"; break;          // TalkBack's menu gesture
-                case GESTURE_2_FINGER_DOUBLE_TAP: cmd = "menu"; break;          // NVDA's ts:2finger_double_tap
-                case GESTURE_3_FINGER_DOUBLE_TAP: cmd = "touchMode"; break;     // NVDA's ts:3finger_tap
-                case GESTURE_2_FINGER_SINGLE_TAP: cmd = "stop"; break;
-                case GESTURE_3_FINGER_SWIPE_DOWN: cmd = "sayAll"; break;        // NVDA's ts:3finger_flickDown
-                case GESTURE_3_FINGER_SWIPE_UP: cmd = "focus"; break;
-                case GESTURE_3_FINGER_SWIPE_RIGHT: cmd = "nextWord"; break;
-                case GESTURE_3_FINGER_SWIPE_LEFT: cmd = "previousWord"; break;
-                case GESTURE_3_FINGER_TRIPLE_TAP: cmd = "speechMode"; break;
-                case GESTURE_4_FINGER_SINGLE_TAP: cmd = "inputHelp"; break;
-                case GESTURE_4_FINGER_DOUBLE_TAP: cmd = "console"; break;
-                case GESTURE_2_FINGER_TRIPLE_TAP: cmd = "symbolLevel"; break;
-                default: break;
-            }
-        }
+        String key = gestureKey(id);
+        if (key == null) return false;
+        if (sayAllActive && !"swipeDownRight".equals(key)) stopSayAll();
+        // Add-on scripts bound to this gesture run first, like NVDA's global plugins.
+        Addons.GestureResult ar = Addons.gesture(Addons.tsIdentifier(key), GestureMap.gestureName(key));
+        if (ar.failedAddon != null) reportAddonFailure(ar.failedAddon, ar.reason);
+        if (ar.handled) return true;
+        if (gestureOverrides == null) gestureOverrides = GestureMap.parse(Prefs.s(this, Prefs.GESTURE_MAP, ""));
+        String cmd = GestureMap.resolve(key, gestureOverrides);
+        // Safety: if the saved bindings somehow leave no NVDA menu gesture, the TalkBack menu gesture opens it.
+        if (cmd == null && "swipeDownRight".equals(key) && GestureMap.leavesNoMenu(gestureOverrides)) cmd = "menu";
         if (cmd == null) return false;
         run(cmd);
         return true;
+    }
+
+
+    private static String gestureKey(int id) {
+        switch (id) {
+            case GESTURE_SWIPE_RIGHT: return "swipeRight";
+            case GESTURE_SWIPE_LEFT: return "swipeLeft";
+            case GESTURE_SWIPE_UP: return "swipeUp";
+            case GESTURE_SWIPE_DOWN: return "swipeDown";
+            case GESTURE_SWIPE_LEFT_AND_RIGHT: return "swipeLeftRight";
+            case GESTURE_SWIPE_RIGHT_AND_LEFT: return "swipeRightLeft";
+            case GESTURE_SWIPE_UP_AND_DOWN: return "swipeUpDown";
+            case GESTURE_SWIPE_DOWN_AND_UP: return "swipeDownUp";
+            case GESTURE_SWIPE_DOWN_AND_RIGHT: return "swipeDownRight";
+            case GESTURE_SWIPE_DOWN_AND_LEFT: return "swipeDownLeft";
+            case GESTURE_SWIPE_UP_AND_LEFT: return "swipeUpLeft";
+            case GESTURE_SWIPE_UP_AND_RIGHT: return "swipeUpRight";
+            case GESTURE_SWIPE_LEFT_AND_UP: return "swipeLeftUp";
+            case GESTURE_SWIPE_LEFT_AND_DOWN: return "swipeLeftDown";
+            case GESTURE_SWIPE_RIGHT_AND_UP: return "swipeRightUp";
+            case GESTURE_SWIPE_RIGHT_AND_DOWN: return "swipeRightDown";
+            default: break;
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            switch (id) {
+                case GESTURE_2_FINGER_SINGLE_TAP: return "2fingerTap";
+                case GESTURE_2_FINGER_DOUBLE_TAP: return "2fingerDoubleTap";
+                case GESTURE_2_FINGER_TRIPLE_TAP: return "2fingerTripleTap";
+                case GESTURE_3_FINGER_SINGLE_TAP: return "3fingerTap";
+                case GESTURE_3_FINGER_DOUBLE_TAP: return "3fingerDoubleTap";
+                case GESTURE_3_FINGER_TRIPLE_TAP: return "3fingerTripleTap";
+                case GESTURE_3_FINGER_SWIPE_UP: return "3fingerSwipeUp";
+                case GESTURE_3_FINGER_SWIPE_DOWN: return "3fingerSwipeDown";
+                case GESTURE_3_FINGER_SWIPE_LEFT: return "3fingerSwipeLeft";
+                case GESTURE_3_FINGER_SWIPE_RIGHT: return "3fingerSwipeRight";
+                case GESTURE_4_FINGER_SINGLE_TAP: return "4fingerTap";
+                case GESTURE_4_FINGER_DOUBLE_TAP: return "4fingerDoubleTap";
+                case GESTURE_4_FINGER_TRIPLE_TAP: return "4fingerTripleTap";
+                case GESTURE_4_FINGER_SWIPE_UP: return "4fingerSwipeUp";
+                case GESTURE_4_FINGER_SWIPE_DOWN: return "4fingerSwipeDown";
+                case GESTURE_4_FINGER_SWIPE_LEFT: return "4fingerSwipeLeft";
+                case GESTURE_4_FINGER_SWIPE_RIGHT: return "4fingerSwipeRight";
+                default: break;
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 31) {
+            switch (id) {
+                case GESTURE_2_FINGER_DOUBLE_TAP_AND_HOLD: return "2fingerDoubleTapHold";
+                case GESTURE_3_FINGER_DOUBLE_TAP_AND_HOLD: return "3fingerDoubleTapHold";
+                default: break;
+            }
+        }
+        return null;
     }
 
     // ------------------------------------------------------------------ keyboard
@@ -1119,6 +1656,14 @@ public class NvidiatorService extends AccessibilityService {
             stopSayAll();
             if (speech != null) speech.cancel();
             return false;
+        }
+        if (nvdaKeyDown && down && ev.getRepeatCount() == 0 && Addons.started()) {
+            String keyName = KeyEvent.keyCodeToString(code).replace("KEYCODE_", "").toLowerCase(java.util.Locale.ROOT);
+            String ident = "kb:NVDA+" + (ev.isCtrlPressed() ? "control+" : "") + (ev.isShiftPressed() ? "shift+" : "")
+                    + (ev.isAltPressed() ? "alt+" : "") + keyName;
+            Addons.GestureResult ar = Addons.gesture(ident, ident.substring(3));
+            if (ar.failedAddon != null) { final String a = ar.failedAddon, r = ar.reason; main.post(() -> reportAddonFailure(a, r)); }
+            if (ar.handled) { nvdaKeyUsed = true; return true; }
         }
         if (nvdaKeyDown) {
             String cmd = nvdaKeyCommand(code, ev.isShiftPressed(), ev.isCtrlPressed());
@@ -1170,6 +1715,7 @@ public class NvidiatorService extends AccessibilityService {
         if (shift) {
             switch (code) {
                 case KeyEvent.KEYCODE_B: return "battery";
+                case KeyEvent.KEYCODE_S: return "sleepMode";
                 case KeyEvent.KEYCODE_DPAD_RIGHT: return "objNext";
                 case KeyEvent.KEYCODE_DPAD_LEFT: return "objPrevious";
                 case KeyEvent.KEYCODE_DPAD_UP: return "objParent";
@@ -1187,6 +1733,7 @@ public class NvidiatorService extends AccessibilityService {
             case KeyEvent.KEYCODE_DPAD_DOWN: case KeyEvent.KEYCODE_A: return "sayAll";
             case KeyEvent.KEYCODE_DPAD_UP: case KeyEvent.KEYCODE_L: return "current";
             case KeyEvent.KEYCODE_F12: return "time";
+            case KeyEvent.KEYCODE_C: return "clipboard";
             case KeyEvent.KEYCODE_P: return "symbolLevel";
             case KeyEvent.KEYCODE_1: return "inputHelp";
             case KeyEvent.KEYCODE_2: return "typedChars";
@@ -1199,7 +1746,6 @@ public class NvidiatorService extends AccessibilityService {
             case KeyEvent.KEYCODE_NUMPAD_2: return "objChild";
             case KeyEvent.KEYCODE_NUMPAD_5: return "current";
             case KeyEvent.KEYCODE_NUMPAD_MULTIPLY: return "activate";
-            case KeyEvent.KEYCODE_C: return "spell";
             case KeyEvent.KEYCODE_F1: return "speechViewer";
             default: return null;
         }
@@ -1313,11 +1859,6 @@ public class NvidiatorService extends AccessibilityService {
         openActivity(PythonConsoleActivity.class);
     }
 
-    void openActivity(Class<?> cls) {
-        Intent i = new Intent(this, cls);
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        startActivity(i);
-    }
 
     /** Turns the screen reader off. With switchToTalkBack and the secure settings permission, TalkBack is turned on in its place. */
     public void exitScreenReader(boolean switchToTalkBack) {
@@ -1369,7 +1910,7 @@ public class NvidiatorService extends AccessibilityService {
 
     public String pyDescribe(AccessibilityNodeInfo n) { return describe(n, "query"); }
 
-    public void pySpeak(String text, boolean interrupt) { main.post(() -> speak(text, interrupt)); }
+    public void pySpeak(String text, boolean interrupt) { main.post(() -> speakDirect(text, interrupt)); }
 
     public void pySpell(String text) {
         main.post(() -> {
@@ -1416,6 +1957,7 @@ public class NvidiatorService extends AccessibilityService {
     }
 
     public void setLanguage(String lang) {
+        starText = null;
         pyThread.execute(() -> NvdaPy.setLanguage(this, lang));
     }
 

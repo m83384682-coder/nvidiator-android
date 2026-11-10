@@ -48,10 +48,17 @@ public class SettingsActivity extends Activity {
     }
 
     private void build() {
-        LinearLayout col = Ui.page(this, t("settingsTitle"));
+        // v0.2: NVDA's settings categories. The list of categories comes first; choosing one shows
+        // its panel, and Back returns to the list.
+        root = Ui.page(this, t("settingsTitle"));
+        cats = new LinearLayout(this);
+        cats.setOrientation(LinearLayout.VERTICAL);
+        root.addView(cats);
+        sections.clear();
+        LinearLayout col;
 
         // General
-        Ui.heading(this, col, t("panelGeneral"), 20);
+        col = section(t("panelGeneral"));
         List<String> codes = new ArrayList<>(), names = new ArrayList<>();
         codes.add("");
         names.add(getString(R.string.user_default_language));
@@ -78,7 +85,7 @@ public class SettingsActivity extends Activity {
         check(col, t("playStartExitSounds"), Prefs.SOUNDS, true);
 
         // Speech
-        Ui.heading(this, col, t("panelSpeech"), 20);
+        col = section(t("panelSpeech"));
         buildSynthChooser(col);
         slider(col, t("rate"), Prefs.RATE, 50);
         slider(col, t("pitch"), Prefs.PITCH, 50);
@@ -101,7 +108,7 @@ public class SettingsActivity extends Activity {
         spinner(col, t("speechMode"), modeNames, curMode, i -> prefs.edit().putString(Prefs.SPEECH_MODE, modes[i]).apply());
 
         // Keyboard
-        Ui.heading(this, col, t("panelKeyboard"), 20);
+        col = section(t("panelKeyboard"));
         Ui.text(this, col, t("selectModifiers"));
         check(col, "Insert", Prefs.KEY_INSERT, true);
         check(col, "Caps Lock", Prefs.KEY_CAPSLOCK, true);
@@ -113,7 +120,7 @@ public class SettingsActivity extends Activity {
         spinner(col, t("typedWords"), echo, Prefs.typedWords(this) ? 1 : 0, i -> { prefs.edit().putBoolean(Prefs.TYPED_WORDS, i == 1).apply(); changed(); });
 
         // Object Presentation
-        Ui.heading(this, col, t("panelObjectPresentation"), 20);
+        col = section(t("panelObjectPresentation"));
         check(col, t("reportNotifications"), Prefs.NOTIFICATIONS, false);
         check(col, t("reportPosition"), Prefs.REPORT_POSITION, true);
         check(col, t("reportDescriptions"), Prefs.REPORT_DESCRIPTIONS, true);
@@ -125,21 +132,58 @@ public class SettingsActivity extends Activity {
         check(col, getString(R.string.report_containers), Prefs.REPORT_CONTAINERS, true);
 
         // Browse Mode
-        Ui.heading(this, col, t("panelBrowseMode"), 20);
+        col = section(t("panelBrowseMode"));
         check(col, t("modeAudio"), Prefs.MODE_SOUNDS, true);
         check(col, getString(R.string.single_letter_nav), Prefs.QUICK_NAV, true);
         Ui.text(this, col, getString(R.string.note_quick_nav));
 
         // Touch Interaction
-        Ui.heading(this, col, t("panelTouch"), 20);
+        col = section(t("panelTouch"));
         check(col, t("touchTyping"), Prefs.LIFT_TO_TYPE, true);
         Ui.text(this, col, getString(R.string.note_touch_typing));
 
         // TalkBack (our addition)
-        Ui.heading(this, col, getString(R.string.talkback_heading), 20);
+        col = section(getString(R.string.talkback_heading));
         Ui.text(this, col, getString(NvidiatorService.hasSecureSettings(this) ? R.string.talkback_switch_ready : R.string.talkback_switch_setup));
 
-        Ui.button(this, col, t("close"), v -> finish());
+        Ui.button(this, root, t("close"), v -> finish());
+    }
+
+    private LinearLayout root, cats, openSection;
+    private final List<LinearLayout> sections = new ArrayList<>();
+
+    private LinearLayout section(String title) {
+        LinearLayout sec = new LinearLayout(this);
+        sec.setOrientation(LinearLayout.VERTICAL);
+        sec.setVisibility(View.GONE);
+        Ui.heading(this, sec, title, 20);
+        root.addView(sec);
+        sections.add(sec);
+        Ui.button(this, cats, title, v -> showSection(sec));
+        return sec;
+    }
+
+    private void showSection(LinearLayout sec) {
+        cats.setVisibility(View.GONE);
+        for (LinearLayout x : sections) x.setVisibility(x == sec ? View.VISIBLE : View.GONE);
+        openSection = sec;
+        View h = sec.getChildAt(0);
+        h.post(() -> h.sendAccessibilityEvent(android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED));
+        h.post(() -> h.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null));
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (openSection != null) {
+            openSection.setVisibility(View.GONE);
+            cats.setVisibility(View.VISIBLE);
+            int i = sections.indexOf(openSection);
+            openSection = null;
+            View c = i >= 0 && i < cats.getChildCount() ? cats.getChildAt(i) : null;
+            if (c != null) c.post(() -> c.performAccessibilityAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS, null));
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void buildSynthChooser(LinearLayout col) {

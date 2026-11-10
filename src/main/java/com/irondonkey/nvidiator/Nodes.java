@@ -197,6 +197,7 @@ public final class Nodes {
         JSONObject o = new JSONObject();
         try {
             o.put("cls", str(n.getClassName()));
+            o.put("pkg", str(n.getPackageName()));
             String cr = chromeRole(n);
             if (!cr.isEmpty()) o.put("chromeRole", cr);
             String rd = roleDescription(n);

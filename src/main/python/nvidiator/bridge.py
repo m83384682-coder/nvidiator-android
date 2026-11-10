@@ -192,6 +192,10 @@ def messages() -> str:
 		"modeTalk": pgettext("speechModes", "talk"),
 		"symbolLevelFmt": _("Symbol level %s"),
 		"typedCharsFmt": _("Speak typed characters {mode}"),
+		"clipboardEmpty": _("There is no text on the clipboard"),
+		"clipboardLargeFmt": ngettext("The clipboard contains a large amount of text. It is %s character long", "The clipboard contains a large amount of text. It is %s character long", 2),
+		"sleepOn": _("Sleep mode on"),
+		"sleepOff": _("Sleep mode off"),
 		"typedWordsFmt": _("Speak typed words {mode}"),
 		"echoOff": _("Off"),
 		"echoAlways": _("Always"),
@@ -337,7 +341,102 @@ _UI_STRINGS = {
 	# Speech viewer and Python console
 	"speechViewerTitle": "NVDA Speech Viewer",
 	"pythonConsoleTitle": "NVDA Python Console",
+	# v0.2: the welcome dialog (gui/startupDialogs.py, WelcomeDialog)
+	"welcomeTitle": "Welcome to NVDA",
+	"welcomeHeader": "Welcome to NVDA!",
+	"welcomeDetail": (
+		"Most commands for controlling NVDA require you to hold down"
+		" the NVDA key while pressing other keys.\n"
+		"By default, the Insert and numpad Insert keys may both be used as the NVDA key.\n"
+		"You can also configure NVDA to use the CapsLock as the NVDA key.\n"
+		"Press NVDA+n at any time to activate the NVDA menu.\n"
+		"From this menu, you can configure NVDA, get help, and access other NVDA functions."
+	),
+	"options": "Options",
+	"capsAsNvda": "&Use CapsLock as an NVDA modifier key",
+	"showWelcome": "&Show this dialog when NVDA starts",
+	# v0.2: Input gestures (gui/__init__.py and gui/inputGestures.py)
+	"menuInputGestures": "I&nput gestures...",
+	"inputGesturesTitle": "Input Gestures",
+	"gestAdd": "&Add",
+	"gestRemove": "&Remove",
+	"gestReset": "Reset to factory &defaults",
+	"gestResetQuestion": (
+		"Are you sure you want to reset all gestures to their factory defaults?\n\n"
+		"\t\t\tAll of your user defined gestures, whether previously set or defined during this session, will be lost.\n"
+		"\t\t\tThis cannot be undone."
+	),
+	"gestResetTitle": "Reset gestures",
+	# v0.2: add-ons (gui/__init__.py, gui/addonGui.py, gui/addonStoreGui/controls/messageDialogs.py)
+	"menuAddonStore": "&Add-on store...",
+	"confirmInstall": (
+		"Are you sure you want to install this add-on?\n"
+		"Only install add-ons from trusted sources.\n"
+		"Addon: {summary} {version}"
+	),
+	"restartQuestion": (
+		"Changes were made to add-ons. "
+		"You must restart NVDA for these changes to take effect. "
+		"Would you like to restart now?"
+	),
+	"restartTitle": "Restart NVDA",
+	"failedOpen": "Failed to open add-on package file at %s - missing file or invalid file format",
+	"failedInstall": "Failed to install add-on from %s",
+	"error": "Error",
+	"yes": "&Yes",
+	"no": "&No",
+	# v0.2 settings (gui/settingsDialogs.py, synthDriverHandler.py, speech/speech.py)
+	"rateBoost": "Rate boos&t",
+	"capPitch": "Capital pitch change percentage",
+	"sayCap": "Say &cap before capitals",
+	"beepCaps": "&Beep for capitals",
+	"interruptTyped": "Speech &interrupt for typed characters",
+	"speakCommandKeys": "Speak c&ommand keys",
+	"soundVolumeFollows": "Volume of NVDA sounds follows voice volume",
+	"soundVolume": "Volume of NVDA sounds",
+	"suggestionSounds": "Play a sound when &auto-suggestions appear",
+	"capPrefix": "cap %s",
+	"panelAudio2": "Audio",
 }
+
+# Strings NVDA translates with a context (pgettext). Key: (context, NVDA source string).
+_UI_PSTRINGS = {
+	"gestFilter": ("inputGestures", "&Filter by:"),
+	"addonStoreTitle": ("addonStore", "Add-on Store"),
+	"addonWarningTitle": ("addonStore", "Add-on Store Warning"),
+	"addonWarning": (
+		"addonStore",
+		"Add-ons are created by the NVDA community and are not vetted by NV Access. "
+		"NV Access cannot be held responsible for add-on behavior. "
+		"The functionality of add-ons is unrestricted and can include "
+		"accessing your personal data or even the entire system. ",
+	),
+	"installExternal": ("addonStore", "Install from e&xternal source"),
+	"chooseAddonFile": ("addonStore", "Choose Add-on Package File"),
+	"installedAddons": ("addonStore", "Installed add-ons"),
+	"addonEnable": ("addonStore", "&Enable"),
+	"addonDisable": ("addonStore", "&Disable"),
+	"addonRemove": ("addonStore", "&Remove"),
+	"removeTitle": ("addonStore", "Remove add-on"),
+	"removeQuestion": (
+		"addonStore",
+		"Are you sure you wish to remove the {addon} add-on from NVDA? This cannot be undone.",
+	),
+	"installTitle": ("addonStore", "Add-on Installation"),
+	"statusEnabled": ("addonStore", "Enabled"),
+	"statusDisabled": ("addonStore", "Disabled"),
+	"statusInstalledPending": ("addonStore", "Installed, pending restart"),
+	"statusDisablePending": ("addonStore", "Disabled, pending restart"),
+	"statusEnablePending": ("addonStore", "Enabled, pending restart"),
+	"statusInstallFailed": ("addonStore", "Install failed"),
+	"statusIncompatible": ("addonStore", "Incompatible"),
+}
+
+
+def _clean(s: str) -> str:
+	"""Removes the & accelerator markers (Android has none) and the source's stray indentation."""
+	s = s.replace("&&", "\0").replace("&", "").replace("\0", "&")
+	return "\n".join(line.strip("\t") for line in s.split("\n"))
 
 
 def uiStrings() -> str:
@@ -347,7 +446,9 @@ def uiStrings() -> str:
 
 	out = {}
 	for key, msgid in _UI_STRINGS.items():
-		out[key] = _(msgid).replace("&&", "\0").replace("&", "").replace("\0", "&")
+		out[key] = _clean(_(msgid))
+	for key, (ctx, msgid) in _UI_PSTRINGS.items():
+		out[key] = _clean(pgettext(ctx, msgid))
 	out["modeTalk"] = pgettext("speechModes", "talk")
 	out["modeBeeps"] = pgettext("speechModes", "beeps")
 	out["modeOff"] = pgettext("speechModes", "off")

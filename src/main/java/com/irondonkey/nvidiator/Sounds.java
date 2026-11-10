@@ -13,7 +13,7 @@ import java.util.Map;
 public final class Sounds {
     public static final String[] NAMES = {
             "start", "exit", "browseMode", "focusMode", "error", "textError", "suggestionsOpened", "suggestionsClosed",
-            "screenCurtainOn", "screenCurtainOff"};
+            "screenCurtainOn", "screenCurtainOff", "clipboardPush", "clipboardReceive", "connected", "disconnected"};
     private static SoundPool pool;
     private static final Map<String, Integer> ids = new HashMap<>();
     private static final Map<String, Boolean> loaded = new HashMap<>();
@@ -51,6 +51,20 @@ public final class Sounds {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    /** Plays a .wav file from a path, such as a sound shipped inside an add-on. */
+    public static synchronized void playFile(String path) {
+        if (pool == null || app == null || path == null) return;
+        if (!Prefs.sounds(app)) return;
+        Integer id = ids.get(path);
+        if (id == null) {
+            if (!new java.io.File(path).isFile()) return;
+            id = pool.load(path, 1);
+            ids.put(path, id);
+        }
+        if (Boolean.TRUE.equals(loaded.get(path))) pool.play(id, volume, volume, 1, 0, 1f);
+        else pending.put(path, true);
     }
 
     /** Plays an NVDA sound by name, like nvwave.playWaveFile("waves\\start.wav"). */

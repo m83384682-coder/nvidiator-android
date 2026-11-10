@@ -59,6 +59,17 @@ public class PythonConsoleActivity extends Activity {
         public void close() { main.post(PythonConsoleActivity.this::finish); }
     }
 
+    private void rowButton(LinearLayout row, String label, View.OnClickListener l) {
+        android.widget.Button btn = Ui.button(this, row, label, l);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        int m = Ui.dp(this, 2);
+        lp.setMargins(m, m, m, m);
+        btn.setLayoutParams(lp);
+        btn.setSingleLine(false);
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        btn.setMinHeight(Ui.dp(this, 48));
+    }
+
     private void speakOutput() {
         String s = pendingSpeech.toString().trim();
         pendingSpeech.setLength(0);
@@ -89,6 +100,8 @@ public class PythonConsoleActivity extends Activity {
         output.setContentDescription(null);
         scroller.addView(output);
         root.addView(scroller, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        // v0.2: the code box is bigger and the buttons sit in two rows under it, so they stay on
+        // screen with the keyboard open (the window resizes instead of hiding them).
 
         prompt = new TextView(this);
         prompt.setText(">>>");
@@ -103,20 +116,24 @@ public class PythonConsoleActivity extends Activity {
         input.setHint(getString(R.string.console_input_hint));
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
-        input.setMinLines(2);
-        input.setMaxLines(8);
+        input.setMinLines(5);
+        input.setMaxLines(14);
+        input.setGravity(android.view.Gravity.TOP | android.view.Gravity.START);
+        input.setVerticalScrollBarEnabled(true);
         input.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         input.setOnKeyListener((v, keyCode, ev) -> onInputKey(keyCode, ev));
-        root.addView(input, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        root.addView(input, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.VERTICAL);
-        root.addView(buttons);
-        Ui.button(this, buttons, getString(R.string.console_run), v -> runInput());
-        Ui.button(this, buttons, getString(R.string.console_complete), v -> complete());
-        Ui.button(this, buttons, getString(R.string.console_previous), v -> historyMove(-1));
-        Ui.button(this, buttons, getString(R.string.console_clear_output), v -> output.setText(""));
-        Ui.button(this, buttons, UiText.get(this, "close"), v -> finish());
+        LinearLayout row1 = new LinearLayout(this), row2 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(row1);
+        root.addView(row2);
+        rowButton(row1, getString(R.string.console_run), v -> runInput());
+        rowButton(row1, getString(R.string.console_complete), v -> complete());
+        rowButton(row1, getString(R.string.console_previous), v -> historyMove(-1));
+        rowButton(row2, getString(R.string.console_clear_output), v -> output.setText(""));
+        rowButton(row2, UiText.get(this, "close"), v -> finish());
         setContentView(root);
 
         output.setText(getString(R.string.console_loading) + "\n");

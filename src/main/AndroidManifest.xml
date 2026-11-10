@@ -39,6 +39,14 @@
             android:taskAffinity="com.irondonkey.nvidiator.console" />
         <activity android:name=".TutorialActivity" android:exported="false" />
         <activity android:name=".AboutActivity" android:exported="false" />
+        <activity android:name=".InputGesturesActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity android:name=".AddonStoreActivity" android:exported="false" />
+        <activity android:name=".WelcomeActivity" android:exported="false" />
+        <activity android:name=".ClipboardActivity" android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:taskAffinity="com.irondonkey.nvidiator.clipboard" />
 
         <service
             android:name=".NvidiatorService"

@@ -127,3 +127,8 @@ def _playWaveFile(fileName: str, asynchronous: bool = True, **kwargs):
 
 
 nvwave = types.SimpleNamespace(playWaveFile=_playWaveFile)
+
+
+def playFile(path: str) -> None:
+	"""Plays a .wav file from a path, e.g. a sound shipped inside an add-on."""
+	_svc().pyPlayFile(str(path))

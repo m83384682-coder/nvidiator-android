@@ -30,6 +30,27 @@ public final class Prefs {
     public static final String KEY_CAPSLOCK = "keyCapsLock";
     public static final String LIFT_TO_TYPE = "liftToType";
     public static final String REPORT_DYNAMIC = "reportDynamic";
+    // v0.2
+    public static final String AUTO_SCROLL = "autoScroll";              // scroll lists at the end, Android only
+    public static final String TAP_INTERRUPT = "tapInterrupt";          // stop speech on double tap / double tap and hold
+    public static final String SAY_CAP = "sayCap";                      // NVDA sayCapForCapitals, default off
+    public static final String BEEP_CAPS = "beepCaps";                  // NVDA beepForCapitals, default off
+    public static final String CAP_PITCH = "capPitch";                  // NVDA capPitchChange, default 30
+    public static final String INTERRUPT_TYPED = "interruptTyped";      // NVDA speechInterruptForCharacters, default on
+    public static final String DELAYED_DESCRIPTIONS = "delayedDescriptions"; // NVDA delayedCharacterDescriptions, default off
+    public static final String SUGGESTION_SOUNDS = "suggestionSounds";  // NVDA reportAutoSuggestionsWithSound, default on
+    public static final String SOUND_VOLUME_FOLLOWS = "soundVolumeFollows"; // NVDA soundVolumeFollowsVoice, default off
+    public static final String SOUND_VOLUME = "soundVolume";            // NVDA soundVolume, default 100
+    public static final String CLIPBOARD_SOUNDS = "clipboardSounds";    // NVDA Remote clipboard sounds for copy and paste
+    public static final String CONNECTION_SOUNDS = "connectionSounds";  // NVDA Remote connected/disconnected sounds for internet
+    public static final String SPEAK_COMMAND_KEYS = "speakCommandKeys"; // NVDA speakCommandKeys, default off
+    public static final String LOCK_ANNOUNCE = "lockAnnounce";          // announce screen locked / unlocked
+    public static final String SHOW_WELCOME = "showWelcomeDialogAtStartup"; // NVDA's welcome dialog checkbox
+    public static final String WELCOME_DONE = "welcomeShown";
+    public static final String RATE_BOOST = "rateBoost";                // NVDA rate boost, default off
+    public static final String REPORT_TOOLTIPS = "reportTooltips";      // NVDA reportTooltips, default off
+    public static final String GESTURE_MAP = "gestureMap";              // JSON of user gesture overrides
+    public static final String ADDON_WARNING = "addonStoreWarning";     // NVDA showWarning for add-on store
 
     private Prefs() {}
 
@@ -59,4 +80,25 @@ public final class Prefs {
     public static boolean keyInsert(Context c) { return b(c, KEY_INSERT, true); }
     public static boolean keyCapsLock(Context c) { return b(c, KEY_CAPSLOCK, true); }
     public static boolean liftToType(Context c) { return b(c, LIFT_TO_TYPE, true); }
+    public static boolean reportDynamic(Context c) { return b(c, REPORT_DYNAMIC, true); }
+    public static boolean autoScroll(Context c) { return b(c, AUTO_SCROLL, true); }
+    public static boolean tapInterrupt(Context c) { return b(c, TAP_INTERRUPT, true); }
+    public static boolean sayCap(Context c) { return b(c, SAY_CAP, false); }
+    public static boolean beepCaps(Context c) { return b(c, BEEP_CAPS, false); }
+    public static int capPitch(Context c) { return i(c, CAP_PITCH, 30); }
+    public static boolean interruptTyped(Context c) { return b(c, INTERRUPT_TYPED, true); }
+    public static boolean delayedDescriptions(Context c) { return b(c, DELAYED_DESCRIPTIONS, false); }
+    public static boolean suggestionSounds(Context c) { return b(c, SUGGESTION_SOUNDS, true); }
+    public static boolean soundVolumeFollows(Context c) { return b(c, SOUND_VOLUME_FOLLOWS, false); }
+    public static int soundVolume(Context c) { return i(c, SOUND_VOLUME, 100); }
+    public static boolean clipboardSounds(Context c) { return b(c, CLIPBOARD_SOUNDS, true); }
+    public static boolean connectionSounds(Context c) { return b(c, CONNECTION_SOUNDS, false); }
+    public static boolean speakCommandKeys(Context c) { return b(c, SPEAK_COMMAND_KEYS, false); }
+    public static boolean lockAnnounce(Context c) { return b(c, LOCK_ANNOUNCE, true); }
+    public static boolean showWelcome(Context c) { return b(c, SHOW_WELCOME, false); } // v0.2: first run only, unless ticked
+    public static boolean rateBoost(Context c) { return b(c, RATE_BOOST, false); }
+    public static boolean reportTooltips(Context c) { return b(c, REPORT_TOOLTIPS, false); }
+    public static void put(Context c, String key, boolean v) { get(c).edit().putBoolean(key, v).apply(); }
+    public static void put(Context c, String key, int v) { get(c).edit().putInt(key, v).apply(); }
+    public static void put(Context c, String key, String v) { get(c).edit().putString(key, v).apply(); }
 }
