@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nvidiator Android: an unofficial, experimental port of NVDA to Android. Not affiliated with NV Access. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Only adb can grant this; it lets the Exit menu switch straight to TalkBack. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.DeviceDefault"
+        android:supportsRtl="true">
+
+        <activity android:name=".MainActivity" android:exported="true" android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".NvdaMenuActivity" android:exported="false"
+            android:excludeFromRecents="true" android:taskAffinity="com.irondonkey.nvidiator.menu"
+            android:launchMode="standard" />
+        <activity android:name=".SettingsActivity" android:exported="true" android:label="@string/settings_label" />
+        <activity android:name=".SpeechViewerActivity" android:exported="false"
+            android:taskAffinity="com.irondonkey.nvidiator.viewer" />
+        <activity android:name=".PythonConsoleActivity" android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:taskAffinity="com.irondonkey.nvidiator.console" />
+        <activity android:name=".TutorialActivity" android:exported="false" />
+        <activity android:name=".AboutActivity" android:exported="false" />
+
+        <service
+            android:name=".NvidiatorService"
+            android:exported="true"
+            android:label="@string/service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service" />
+        </service>
+    </application>
+</manifest>
